@@ -2,12 +2,10 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"time"
 
 	"github.com/tarm/serial"
 )
@@ -60,8 +58,6 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 	var outBuf bytes.Buffer
 	buf := make([]byte, 1024)
 
-	lastForwadingTime := time.Now()
-
 	for {
 		n, err := ser.Read(buf)
 		if err != nil {
@@ -105,16 +101,7 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 					// fmt.Println(hex.Dump(outBuf.Bytes()))
 
 					// check check sum
-					if csumCalc == csum {
-						// buffer enough events, then forward to tcp
-						if outBuf.Len() >= 1024 {
-							log.Println("Forwarding..")
-							fmt.Println(hex.Dump(outBuf.Bytes()))
-
-							outBuf.WriteTo(conn)
-							lastForwadingTime = time.Now()
-						}
-					} else {
+					if csumCalc != csum {
 						// discard latest event, for its broken
 						log.Println("Checksum incorrected")
 
@@ -126,15 +113,13 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 			}
 		}
 
-		// the duration since last forwarding data longer, force forwarding.
-		if time.Now().After(lastForwadingTime.Add(time.Second * 2)) {
-			avail := outBuf.Len()
-			if avail > 0 {
-				conn.Write(outBuf.Next(avail - evtlenCalc)) // excluding uncompleted event
+		// forwarding to TCP
+		avail := outBuf.Len()
+		if avail > 0 {
+			// excluding uncompleted event
+			conn.Write(outBuf.Next(avail - evtlenCalc))
 
-				// now uncompleted event still in @outBuf
-				lastForwadingTime = time.Now()
-			}
+			// now uncompleted event still in @outBuf
 		}
 
 	}
@@ -167,44 +152,8 @@ func main() {
 
 		log.Println("Tcp client connected: ", conn.RemoteAddr())
 
-		// go forward(conn, ser)
-		// go forward(ser, conn)
-
 		go tcp2ser(conn, ser)
 		go ser2tcp(ser, conn)
-	}
-
-}
-
-func forward(dest io.Writer, src io.Reader) {
-	var name [2]string
-	arr := []interface{}{dest, src}
-	for i, dir := range arr {
-		switch dir.(type) {
-		case net.Conn:
-			name[i] = "Tcp"
-		case *serial.Port:
-			name[i] = "Serial"
-		}
-	}
-
-	log.Println("Start forwarding : ", name[0], "<-- ", name[1])
-
-	buf := make([]byte, 128)
-
-	for {
-		n, err := src.Read(buf)
-		if err != nil {
-			log.Println(err)
-			break
-		}
-		log.Printf("%s read : %q\n", name[1], buf[:n])
-		n, err = dest.Write(buf[:n])
-		if err != nil {
-			log.Println(err)
-			break
-		}
-		// log.Println(n)
 	}
 
 }
