@@ -216,7 +216,7 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 
 		// forwarding to TCP
 		avail := eventBuf.Len()
-		if avail > 0 {
+		if avail > evtlenCalc {
 			newBuf := eventBufPoolGetFromFree(pool)
 			if newBuf == nil {
 				log.Fatal("no more eventBuf in pool")
@@ -258,7 +258,10 @@ func forwardingToTCP(tcp io.Writer, readyChan chan int, pool *eventBufPool) {
 			continue
 		}
 
-		eventBuf.WriteTo(tcp)
+		_, err := eventBuf.WriteTo(tcp)
+		if err != nil {
+			log.Println("tcp send failed ", err)
+		}
 
 		eventBufPoolPutToFree(pool, eventBuf)
 	}
@@ -284,7 +287,6 @@ func main() {
 
 	// listening on TCP port
 	port := fmt.Sprintf(":%d", *tcpListenPort)
-	fmt.Println(port)
 	ln, err := net.Listen("tcp", port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot listen on %s\n", port)
