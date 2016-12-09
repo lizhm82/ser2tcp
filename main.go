@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"container/list"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -45,7 +46,7 @@ func tcp2ser(conn io.Reader, ser io.Writer) {
 			break
 		}
 
-		fmt.Println(buf[:n])
+		fmt.Println("Tcp Received\n", hex.Dump(buf[:n]))
 
 		n, err = ser.Write(buf[:n])
 		if err != nil {
@@ -81,6 +82,10 @@ func eventBufPoolCreate(numLimit int) *eventBufPool {
 	}
 
 	return &pool
+}
+
+func eventBufPoolDestroy(pool *eventBufPool) {
+	//TODO
 }
 
 func eventBufPoolGetFromFree(pool *eventBufPool) *bytes.Buffer {
@@ -138,30 +143,51 @@ func eventBufPoolPutToUsed(pool *eventBufPool, buf *bytes.Buffer) {
 func ser2tcp(ser io.Reader, conn io.Writer) {
 	state := sLookingMark0
 	var csum, csumCalc byte
-	var evtlen, evtlenCalc int
+	var evtlen, evtlenCalc byte
 
 	buf := make([]byte, 1024)
 
 	// communication flag
-	readyChan := make(chan int)
+	readyChan := make(chan bool, 10) // buffered channel, buffer num same to eventBufPool limit
 	defer close(readyChan)
 
 	pool := eventBufPoolCreate(10)
+	forwardingDie := false
 
-	go forwardingToTCP(conn, readyChan, pool)
+	go func() {
+		for _ = range readyChan {
+
+			eventBuf := eventBufPoolGetFromUsed(pool)
+			if eventBuf == nil {
+				continue
+			}
+
+			_, err := eventBuf.WriteTo(conn)
+			if err != nil {
+				log.Println("tcp send failed ", err)
+				break
+			}
+
+			eventBufPoolPutToFree(pool, eventBuf)
+		}
+
+		forwardingDie = true
+		fmt.Println("tcp forwarding Leaving")
+	}()
 
 	eventBuf := eventBufPoolGetFromFree(pool)
 
-	for {
+	for !forwardingDie {
 		n, err := ser.Read(buf)
 		if err != nil {
 			log.Println(err)
 			break
 		}
+
 		// fmt.Println("Serail Received\n", hex.Dump(buf[:n]))
 
 		// parse event then put to eventBuf
-		for index := 0; index < n; index++ { // for _, v := range buf[:n] {
+		for index := 0; index < n; index++ {
 			v := buf[index]
 			switch state {
 			case sLookingMark0:
@@ -178,7 +204,7 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 					state = sLookingMark0
 				}
 			case sLookingEventLen:
-				evtlen = int(v)
+				evtlen = v
 				state = sLookingChkSum
 			case sLookingChkSum:
 				csum = v
@@ -198,10 +224,10 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 						// discard latest event, for its broken
 						log.Println("Checksum incorrected")
 
-						eventBuf.Truncate(eventBuf.Len() - evtlen)
+						eventBuf.Truncate(eventBuf.Len() - int(evtlen))
 
 						// roll back to search new event
-						index -= evtlen
+						index -= int(evtlen)
 						if index < 0 { // happens when a event be splited in two buffer
 							index = -1
 						}
@@ -216,7 +242,7 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 
 		// forwarding to TCP
 		avail := eventBuf.Len()
-		if avail > evtlenCalc {
+		if avail > int(evtlenCalc) {
 			newBuf := eventBufPoolGetFromFree(pool)
 			if newBuf == nil {
 				log.Fatal("no more eventBuf in pool")
@@ -224,47 +250,27 @@ func ser2tcp(ser io.Reader, conn io.Writer) {
 
 			if evtlenCalc > 0 {
 				// copy the incompleted event to the newBuf
-				epart := eventBuf.Bytes()[(avail - evtlenCalc):]
+				epart := eventBuf.Bytes()[(avail - int(evtlenCalc)):]
 				b := make([]byte, len(epart))
 				copy(b, epart)
 				newBuf.Write(b)
 
 				// forwarding the eventBuf exclude the incompleted event
-				eventBuf.Truncate(avail - evtlenCalc)
+				eventBuf.Truncate(avail - int(evtlenCalc))
 			}
 
 			eventBufPoolPutToUsed(pool, eventBuf)
 
 			// notify event buffer ready
-			readyChan <- 1
+			readyChan <- true
 
 			eventBuf = newBuf
 		}
 
 	}
-}
 
-func forwardingToTCP(tcp io.Writer, readyChan chan int, pool *eventBufPool) {
-	var rc <-chan int = readyChan // rc is receive-only channel
-
-	for {
-		_, ok := <-rc
-		if !ok { // channel closed
-			break
-		}
-
-		eventBuf := eventBufPoolGetFromUsed(pool)
-		if eventBuf == nil {
-			continue
-		}
-
-		_, err := eventBuf.WriteTo(tcp)
-		if err != nil {
-			log.Println("tcp send failed ", err)
-		}
-
-		eventBufPoolPutToFree(pool, eventBuf)
-	}
+	eventBufPoolDestroy(pool)
+	fmt.Println("ser2tcp Leaving")
 }
 
 func main() {
